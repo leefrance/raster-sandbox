@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Raster Tile Viewer - Enhanced Native GDAL</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; background: transparent; }
+        #map { height: 100vh; width: 100vw; background: transparent; }
+        .leaflet-container { background: transparent !important; }
+        .leaflet-tile { background: transparent !important; }
+        .info { padding: 6px 8px; font: 14px/16px Arial, Helvetica, sans-serif; background: white; background: rgba(255,255,255,0.8); box-shadow: 0 0 15px rgba(0,0,0,0.2); border-radius: 5px; }
+        .layer-control { background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2); max-height: 300px; overflow-y: auto; }
+        .layer-item { margin: 5px 0; }
+        .opacity-control { margin-left: 20px; font-size: 12px; }
+        .performance-info { position: absolute; top: 10px; left: 10px; z-index: 1000; background: rgba(0,128,0,0.8); color: white; padding: 5px 10px; border-radius: 3px; font-family: monospace; font-size: 12px; }
+        .loading { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="performance-info">
+        ⚡ Enhanced Native GDAL | VRT + --xyz | <span id="layer-count">...</span> Layers | Folder-based
+    </div>
+    <div id="map"></div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize map
+        var map = L.map('map').setView([47.7511, -120.7401], 11);
+        
+        // Base map
+        var baseMap = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        
+        // Function to discover available tile layers
+        async function discoverLayers() {
+            try {
+                // Attempt to fetch the tiles directory listing
+                // This is a fallback approach - in production you might want a proper API
+                const knownLayers = ['ambient', 'shadows', 'texture'];  // Add more as needed
+                const availableLayers = [];
+                
+                for (const layer of knownLayers) {
+                    try {
+                        // Test if layer exists by trying to fetch a tile
+                        const response = await fetch(`../tiles/${layer}/9/`, { method: 'HEAD' });
+                        if (response.ok || response.status === 404) {
+                            // 404 might mean the specific tile doesn't exist but the layer does
+                            availableLayers.push(layer);
+                        }
+                    } catch (e) {
+                        // Layer might still exist, add it anyway
+                        availableLayers.push(layer);
+                    }
+                }
+                
+                return availableLayers;
+            } catch (error) {
+                console.warn('Could not discover layers automatically, using defaults');
+                return ['ambient', 'shadows', 'texture'];
+            }
+        }
+        
+        // Initialize layers
+        async function initializeLayers() {
+            const availableLayers = await discoverLayers();
+            const tileLayers = {};
+            
+            // Create tile layers
+            availableLayers.forEach(function(layerName) {
+                tileLayers[layerName] = L.tileLayer(`../tiles/${layerName}/{z}/{x}/{y}.png`, {
+                    attribution: `${layerName} tiles (Enhanced Native GDAL)`,
+                    maxZoom: 13,
+                    opacity: 0.8
+                });
+            });
+            
+            // Update layer count
+            document.getElementById('layer-count').textContent = availableLayers.length;
+            
+            // Add first layer by default
+            const firstLayer = availableLayers[0];
+            if (firstLayer && tileLayers[firstLayer]) {
+                tileLayers[firstLayer].addTo(map);
+            }
+            
+            // Create custom layer control
+            var layerControl = L.control({ position: 'topright' });
+            layerControl.onAdd = function(map) {
+                var div = L.DomUtil.create('div', 'layer-control');
+                div.innerHTML = '<h4>🚀 Enhanced GDAL Layers</h4>';
+                
+                availableLayers.forEach(function(layerName) {
+                    var layerItem = L.DomUtil.create('div', 'layer-item', div);
+                    
+                    var checkbox = L.DomUtil.create('input', '', layerItem);
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = layerName === firstLayer;
+                    checkbox.id = 'layer-' + layerName;
+                    
+                    var label = L.DomUtil.create('label', '', layerItem);
+                    label.htmlFor = 'layer-' + layerName;
+                    label.innerHTML = ' ' + layerName.charAt(0).toUpperCase() + layerName.slice(1);
+                    
+                    var opacityDiv = L.DomUtil.create('div', 'opacity-control', layerItem);
+                    var opacityLabel = L.DomUtil.create('span', '', opacityDiv);
+                    opacityLabel.innerHTML = 'Opacity: ';
+                    var opacitySlider = L.DomUtil.create('input', '', opacityDiv);
+                    opacitySlider.type = 'range';
+                    opacitySlider.min = '0';
+                    opacitySlider.max = '1';
+                    opacitySlider.step = '0.1';
+                    opacitySlider.value = '0.8';
+                    opacitySlider.style.width = '80px';
+                    
+                    // Event handlers
+                    checkbox.addEventListener('change', function() {
+                        if (this.checked) {
+                            tileLayers[layerName].addTo(map);
+                        } else {
+                            map.removeLayer(tileLayers[layerName]);
+                        }
+                    });
+                    
+                    opacitySlider.addEventListener('input', function() {
+                        tileLayers[layerName].setOpacity(this.value);
+                    });
+                });
+                
+                return div;
+            };
+            layerControl.addTo(map);
+            
+            console.log('⚡ Enhanced Native GDAL tile viewer loaded');
+            console.log('📊 Available layers:', availableLayers);
+            console.log('🚀 Generated with VRT + --xyz flag (folder-based processing!)');
+        }
+        
+        // Mouse position display
+        var mousePosition = L.control({ position: 'bottomleft' });
+        mousePosition.onAdd = function(map) {
+            var div = L.DomUtil.create('div', 'info');
+            div.innerHTML = 'Move mouse over map';
+            return div;
+        };
+        mousePosition.addTo(map);
+        
+        map.on('mousemove', function(e) {
+            mousePosition.getContainer().innerHTML = 
+                'Lat: ' + e.latlng.lat.toFixed(5) + 
+                ', Lng: ' + e.latlng.lng.toFixed(5) +
+                ', Zoom: ' + map.getZoom();
+        });
+        
+        // Initialize the application
+        initializeLayers();
+    </script>
+</body>
+</html>
