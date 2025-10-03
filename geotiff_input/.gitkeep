@@ -1,0 +1,23 @@
+# GeoTIFF Input Directory
+
+This directory is where you organize your GeoTIFF files by type.
+
+## Usage:
+1. Create subfolders for each raster type (e.g., ambient/, shadows/, texture/, elevation/)
+2. Place related GeoTIFF files (.tif/.tiff) in the appropriate folders
+3. Run the processing scripts to generate tiles
+
+## Example structure:
+```
+geotiff_input/
+├── ambient/
+│   ├── region1_ambient.tif
+│   └── region2_ambient.tif
+├── shadows/
+│   └── shadows_data.tif
+└── elevation/
+    ├── dem_north.tif
+    └── dem_south.tif
+```
+
+Each folder will be processed into a single tile pyramid using VRT technology.

@@ -1,8 +1,9 @@
 # Tiles output directory
 tiles/
 
-# GeoTIFF input directory
-geotiff_input/
+# GeoTIFF input directory - ignore all contents except .gitkeep
+geotiff_input/*
+!geotiff_input/.gitkeep
 
 # Python
 __pycache__/
