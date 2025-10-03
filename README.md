@@ -16,10 +16,12 @@ A high-performance, folder-based raster tile generation system with both **nativ
 ```
 raster-sandbox/
 ├── geotiff_input/          # Input GeoTIFF files organized by type
-│   ├── ambient/            # Ambient lighting rasters
+│   # Example subfolder structure
+    ├── ambient/            # Ambient lighting rasters
 │   ├── shadows/            # Shadow rasters  
 │   └── texture/            # Texture rasters
 ├── tiles/                  # Generated tile pyramids
+    #Example tile pyramids
 │   ├── ambient/            # XYZ tiles for ambient layer
 │   ├── shadows/            # XYZ tiles for shadows layer
 │   └── texture/            # XYZ tiles for texture layer
@@ -29,7 +31,6 @@ raster-sandbox/
 │   ├── enhanced_native_gdal_tiles.sh  # Native GDAL processor (recommended)
 │   ├── enhanced_docker_tiles.sh       # Docker-based processor
 │   └── cors_server.py                 # Development web server
-└── learning/               # Historical reference files
 ```
 
 ## 🚀 Quick Start
