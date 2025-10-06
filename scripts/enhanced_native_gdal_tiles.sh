@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# =================================================================
+# =========TILE_SIZE=256
+PROCESSES=4
+
+# Parse command line arguments===================================================
 # NATIVE HOMEBREW GDAL FOLDER-BASED TILE GENERATOR - ENHANCED VERSION
 # =================================================================
 #
@@ -45,9 +48,18 @@ while [[ $# -gt 0 ]]; do
             TILE_SIZE="$2"
             shift 2
             ;;
-        -j|--processes)
+        -j|        --processes)
             PROCESSES="$2"
             shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--port PORT] [--min-zoom ZOOM] [--max-zoom ZOOM] [--tile-size SIZE] [--processes NUM]"
+            echo "  --port PORT          : Port for the local server (default: 8000)"
+            echo "  --min-zoom ZOOM      : Minimum zoom level (default: 9)"
+            echo "  --max-zoom ZOOM      : Maximum zoom level (default: 13)"
+            echo "  --tile-size SIZE     : Tile size in pixels (default: 512)"
+            echo "  --processes NUM      : Number of parallel processes (default: 4)"
+            exit 0
             ;;
         *)
             echo "Unknown option: $1"
@@ -95,6 +107,36 @@ echo ""
 # Create output directories
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$VRT_DIR"
+
+# Function to merge tile directories into a single output directory
+merge_tile_directories() {
+    local output_dir="$1"
+    shift
+    local temp_dirs=("$@")
+    
+    echo "  🔗 Merging ${#temp_dirs[@]} tile directories into $output_dir..."
+    
+    # Create output directory
+    mkdir -p "$output_dir"
+    
+    # Copy tiles from all temp directories, preserving structure
+    for temp_dir in "${temp_dirs[@]}"; do
+        if [[ -d "$temp_dir" ]]; then
+            echo "    📂 Merging tiles from $(basename "$temp_dir")..."
+            # Use rsync to merge directory structures
+            rsync -av "$temp_dir/" "$output_dir/" || {
+                echo "    ⚠️  Failed to merge from $temp_dir"
+                return 1
+            }
+        fi
+    done
+    
+    # Count final tiles
+    local total_tiles=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+    echo "    ✅ Merged complete: $total_tiles total tiles"
+    
+    return 0
+}
 
 # Function to validate GeoTIFF files in a folder
 validate_geotiffs() {
@@ -174,70 +216,62 @@ for folder in "${input_folders[@]}"; do
     
     # Validate GeoTIFF files in this folder
     if geotiff_files=($(validate_geotiffs "$folder")); then
-        # Create VRT file for this folder
-        vrt_file="$VRT_DIR/${folder_name}.vrt"
-        echo "🔗 Creating VRT for $folder_name with ${#geotiff_files[@]} file(s)..."
         
-        # Use gdalbuildvrt with resolution=highest and preserve alpha transparency
-        if "$HOMEBREW_GDAL_PREFIX/bin/gdalbuildvrt" \
-            -resolution highest \
-            -hidenodata \
-            "$vrt_file" \
-            "${geotiff_files[@]}"; then
-            echo "  ✅ VRT created: $vrt_file"
-            # Generate tiles from VRT
-            output_path="$OUTPUT_DIR/$folder_name"
+        echo "🎯 Processing ${#geotiff_files[@]} files individually to optimize performance..."
+        
+        # Create temp directory for individual tile outputs
+        temp_base_dir="$VRT_DIR/temp_tiles_$folder_name"
+        mkdir -p "$temp_base_dir"
+        
+        temp_tile_dirs=()
+        successful_files=()
+        
+        # Process each GeoTIFF individually
+        for geotiff in "${geotiff_files[@]}"; do
+            filename=$(basename "$geotiff" .tif)
+            temp_output="$temp_base_dir/$filename"
             
-            echo "🚀 Generating tiles for $folder_name..."
+            echo "  📍 Processing $(basename "$geotiff")..."
             
-            # Check if tiles already exist and are recent
-            if [[ -d "$output_path" ]]; then
-                # Check if the output path has actual tile files, not just empty directories
-                tile_count=$(find "$output_path" -name "*.png" | wc -l)
-                if [[ $tile_count -gt 0 ]]; then
-                    # Check if any source file is newer than the tiles
-                    needs_update=false
-                    for geotiff in "${geotiff_files[@]}"; do
-                        if [[ "$geotiff" -nt "$output_path" ]]; then
-                            needs_update=true
-                            break
-                        fi
-                    done
-                    
-                    if [[ "$needs_update" == false ]]; then
-                        echo "  ✅ Tiles are up to date, skipping..."
-                        processed_layers+=("$folder_name")
-                        continue
-                    fi
-                else
-                    echo "  🔄 Existing directory is empty, regenerating..."
-                fi
-            fi
-            
-            # Create output directory
-            mkdir -p "$output_path"
-            
-            # Use Homebrew GDAL with --xyz flag for direct XYZ generation
-            echo "  🚀 Running native GDAL with --xyz flag on VRT..."
+            # Generate tiles for this individual file
             "$HOMEBREW_GDAL_PREFIX/bin/gdal2tiles.py" \
                 --profile=mercator \
                 --xyz \
                 --webviewer=none \
                 --resampling=bilinear \
                 --zoom=$MIN_ZOOM-$MAX_ZOOM \
-                --processes=$PROCESSES \
+                --processes=1 \
                 --tilesize=$TILE_SIZE \
-                "$vrt_file" \
-                "$output_path"
+                "$geotiff" \
+                "$temp_output"
             
             if [[ $? -eq 0 ]]; then
-                echo "  ✅ Completed $folder_name"
-                processed_layers+=("$folder_name")
+                temp_tile_dirs+=("$temp_output")
+                successful_files+=("$geotiff")
+                
+                # Count tiles generated for this file
+                tile_count=$(find "$temp_output" -name "*.png" 2>/dev/null | wc -l)
+                echo "    ✅ Generated $tile_count tiles for $(basename "$geotiff")"
             else
-                echo "  ❌ Failed to generate tiles for $folder_name"
+                echo "    ❌ Failed to generate tiles for $(basename "$geotiff")"
+            fi
+        done
+        
+        # Merge all individual tile directories
+        if [[ ${#temp_tile_dirs[@]} -gt 0 ]]; then
+            output_path="$OUTPUT_DIR/$folder_name"
+            
+            if merge_tile_directories "$output_path" "${temp_tile_dirs[@]}"; then
+                echo "  ✅ Successfully merged tiles for $folder_name"
+                processed_layers+=("$folder_name")
+                
+                # Clean up temp directories
+                rm -rf "$temp_base_dir"
+            else
+                echo "  ❌ Failed to merge tiles for $folder_name"
             fi
         else
-            echo "  ❌ Failed to create VRT for $folder_name"
+            echo "  ❌ No tiles were generated for any files in $folder_name"
         fi
     fi
     echo ""
@@ -257,8 +291,19 @@ echo "🎨 Updating web viewer..."
 
 # Update viewer HTML to dynamically discover layers
 update_viewer() {
-    # Create viewer HTML with dynamic layer discovery
-    cat > "$VIEWER_DIR/index.html" << 'EOF'
+    local layers=("$@")
+    
+    # Create JavaScript array string from the layers
+    local js_layers=""
+    for layer in "${layers[@]}"; do
+        if [[ -n "$js_layers" ]]; then
+            js_layers="$js_layers, "
+        fi
+        js_layers="$js_layers'$layer'"
+    done
+    
+    # Create viewer HTML with actual generated layers
+    cat > "$VIEWER_DIR/index.html" << EOF
 <!DOCTYPE html>
 <html>
 <head>
@@ -298,7 +343,7 @@ update_viewer() {
             try {
                 // Attempt to fetch the tiles directory listing
                 // This is a fallback approach - in production you might want a proper API
-                const knownLayers = ['ambient', 'shadows', 'texture'];  // Add more as needed
+                const knownLayers = [$js_layers];  // Generated from actual tile layers
                 const availableLayers = [];
                 
                 for (const layer of knownLayers) {
@@ -424,13 +469,13 @@ EOF
     echo "✅ Enhanced viewer created with dynamic layer discovery"
 }
 
-update_viewer
+update_viewer "${processed_layers[@]}"
 
 echo ""
 echo "✅ Enhanced Native GDAL tile generation complete!"
 echo "📁 Generated ${#processed_layers[@]} tile layer(s): $(IFS=', '; echo "${processed_layers[*]}")"
 echo "📁 Tiles saved to: $OUTPUT_DIR"
-echo "⚡ Used VRT + --xyz flag for optimal performance"
+echo "⚡ Used individual processing + --xyz flag for optimal performance"
 echo "🌐 Starting CORS-enabled server on port $PORT..."
 echo ""
 

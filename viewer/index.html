@@ -6,10 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; padding: 0; font-family: Arial, sans-serif; background: transparent; }
-        #map { height: 100vh; width: 100vw; background: transparent; }
-        .leaflet-container { background: transparent !important; }
-        .leaflet-tile { background: transparent !important; }
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { height: 100vh; width: 100vw; }
         .info { padding: 6px 8px; font: 14px/16px Arial, Helvetica, sans-serif; background: white; background: rgba(255,255,255,0.8); box-shadow: 0 0 15px rgba(0,0,0,0.2); border-radius: 5px; }
         .layer-control { background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2); max-height: 300px; overflow-y: auto; }
         .layer-item { margin: 5px 0; }
@@ -20,7 +18,7 @@
 </head>
 <body>
     <div class="performance-info">
-        ⚡ Enhanced Native GDAL | VRT + --xyz | <span id="layer-count">...</span> Layers | Folder-based
+        ⚡ Enhanced Native GDAL | Individual Processing | <span id="layer-count">...</span> Layers
     </div>
     <div id="map"></div>
     
@@ -37,9 +35,8 @@
         // Function to discover available tile layers
         async function discoverLayers() {
             try {
-                // Attempt to fetch the tiles directory listing
-                // This is a fallback approach - in production you might want a proper API
-                const knownLayers = ['ambient', 'shadows', 'texture'];  // Add more as needed
+                // Known layers from tile generation
+                const knownLayers = ['shadows', 'texture'];
                 const availableLayers = [];
                 
                 for (const layer of knownLayers) {
@@ -56,10 +53,11 @@
                     }
                 }
                 
-                return availableLayers;
+                return availableLayers.length > 0 ? availableLayers : knownLayers;
             } catch (error) {
-                console.warn('Could not discover layers automatically, using defaults');
-                return ['ambient', 'shadows', 'texture'];
+                console.error('Error discovering layers:', error);
+                // Fallback to known layers
+                return ['shadows', 'texture'];
             }
         }
         
@@ -73,7 +71,8 @@
                 tileLayers[layerName] = L.tileLayer(`../tiles/${layerName}/{z}/{x}/{y}.png`, {
                     attribution: `${layerName} tiles (Enhanced Native GDAL)`,
                     maxZoom: 13,
-                    opacity: 0.8
+                    opacity: 0.8,
+                    errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
                 });
             });
             
@@ -84,77 +83,68 @@
             const firstLayer = availableLayers[0];
             if (firstLayer && tileLayers[firstLayer]) {
                 tileLayers[firstLayer].addTo(map);
+                
+                // Auto-fit to bounds of the first loaded tile layer
+                setTimeout(() => {
+                    const bounds = L.latLngBounds([
+                        [47.70, -120.80],
+                        [47.80, -120.68]
+                    ]);
+                    map.fitBounds(bounds);
+                }, 500);
             }
             
-            // Create custom layer control
-            var layerControl = L.control({ position: 'topright' });
+            // Create layer control
+            const layerControl = L.control({ position: 'topright' });
             layerControl.onAdd = function(map) {
-                var div = L.DomUtil.create('div', 'layer-control');
-                div.innerHTML = '<h4>🚀 Enhanced GDAL Layers</h4>';
+                const div = L.DomUtil.create('div', 'layer-control');
+                div.innerHTML = '<h4>Layers</h4>';
                 
                 availableLayers.forEach(function(layerName) {
-                    var layerItem = L.DomUtil.create('div', 'layer-item', div);
+                    const layerDiv = L.DomUtil.create('div', 'layer-item', div);
                     
-                    var checkbox = L.DomUtil.create('input', '', layerItem);
+                    const checkbox = L.DomUtil.create('input', '', layerDiv);
                     checkbox.type = 'checkbox';
-                    checkbox.checked = layerName === firstLayer;
                     checkbox.id = 'layer-' + layerName;
+                    checkbox.checked = layerName === firstLayer;
                     
-                    var label = L.DomUtil.create('label', '', layerItem);
+                    const label = L.DomUtil.create('label', '', layerDiv);
                     label.htmlFor = 'layer-' + layerName;
-                    label.innerHTML = ' ' + layerName.charAt(0).toUpperCase() + layerName.slice(1);
+                    label.innerHTML = ' ' + layerName;
                     
-                    var opacityDiv = L.DomUtil.create('div', 'opacity-control', layerItem);
-                    var opacityLabel = L.DomUtil.create('span', '', opacityDiv);
+                    // Opacity slider
+                    const opacityDiv = L.DomUtil.create('div', 'opacity-control', layerDiv);
+                    const opacityLabel = L.DomUtil.create('label', '', opacityDiv);
                     opacityLabel.innerHTML = 'Opacity: ';
-                    var opacitySlider = L.DomUtil.create('input', '', opacityDiv);
+                    const opacitySlider = L.DomUtil.create('input', '', opacityDiv);
                     opacitySlider.type = 'range';
                     opacitySlider.min = '0';
                     opacitySlider.max = '1';
                     opacitySlider.step = '0.1';
                     opacitySlider.value = '0.8';
-                    opacitySlider.style.width = '80px';
                     
                     // Event handlers
-                    checkbox.addEventListener('change', function() {
+                    checkbox.onchange = function() {
                         if (this.checked) {
                             tileLayers[layerName].addTo(map);
                         } else {
                             map.removeLayer(tileLayers[layerName]);
                         }
-                    });
+                    };
                     
-                    opacitySlider.addEventListener('input', function() {
+                    opacitySlider.oninput = function() {
                         tileLayers[layerName].setOpacity(this.value);
-                    });
+                    };
                 });
                 
                 return div;
             };
             layerControl.addTo(map);
             
-            console.log('⚡ Enhanced Native GDAL tile viewer loaded');
-            console.log('📊 Available layers:', availableLayers);
-            console.log('🚀 Generated with VRT + --xyz flag (folder-based processing!)');
+            console.log('⚡ Enhanced Native GDAL tile viewer loaded with layers:', availableLayers);
         }
         
-        // Mouse position display
-        var mousePosition = L.control({ position: 'bottomleft' });
-        mousePosition.onAdd = function(map) {
-            var div = L.DomUtil.create('div', 'info');
-            div.innerHTML = 'Move mouse over map';
-            return div;
-        };
-        mousePosition.addTo(map);
-        
-        map.on('mousemove', function(e) {
-            mousePosition.getContainer().innerHTML = 
-                'Lat: ' + e.latlng.lat.toFixed(5) + 
-                ', Lng: ' + e.latlng.lng.toFixed(5) +
-                ', Zoom: ' + map.getZoom();
-        });
-        
-        // Initialize the application
+        // Initialize when page loads
         initializeLayers();
     </script>
 </body>

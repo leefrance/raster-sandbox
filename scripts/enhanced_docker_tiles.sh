@@ -5,8 +5,8 @@
 # =================================================================
 #
 # This script provides a Docker-based approach to generating raster tiles
-# using folder-based architecture with VRT processing, similar to the 
-# enhanced native GDAL script but with Docker containerization.
+# using folder-based architecture with individual file processing for
+# optimal performance, especially with geographically distributed data.
 
 set -e
 
@@ -131,6 +131,36 @@ validate_geotiffs() {
     return 0
 }
 
+# Function to merge individual tile directories into a single output
+merge_tile_directories() {
+    local output_dir="$1"
+    shift
+    local temp_dirs=("$@")
+    
+    echo "  🔗 Merging ${#temp_dirs[@]} tile directories into $output_dir..."
+    
+    # Create output directory
+    mkdir -p "$output_dir"
+    
+    # Copy tiles from all temp directories, preserving structure
+    for temp_dir in "${temp_dirs[@]}"; do
+        if [[ -d "$temp_dir" ]]; then
+            echo "    📂 Merging tiles from $(basename "$temp_dir")..."
+            # Use rsync to merge directory structures
+            rsync -av "$temp_dir/" "$output_dir/" || {
+                echo "    ⚠️  Failed to merge from $temp_dir"
+                return 1
+            }
+        fi
+    done
+    
+    # Count final tiles
+    local total_tiles=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+    echo "    ✅ Merged complete: $total_tiles total tiles"
+    
+    return 0
+}
+
 # Scan for subfolders in input directory
 echo "🔍 Scanning for input folders..."
 input_folders=()
@@ -164,99 +194,61 @@ for folder in "${input_folders[@]}"; do
     
     # Validate GeoTIFF files in this folder
     if geotiff_files=($(validate_geotiffs "$folder")); then
-        # Create VRT file for this folder using Docker
-        vrt_file="$VRT_DIR/${folder_name}.vrt"
-        echo "🔗 Creating VRT for $folder_name with ${#geotiff_files[@]} file(s)..."
         
-        # Prepare file list for Docker (using container paths)
-        docker_file_args=()
+        echo "🎯 Processing ${#geotiff_files[@]} files individually to optimize performance..."
+        
+        # Create temp directory for individual tile outputs
+        temp_base_dir="$VRT_DIR/temp_tiles_$folder_name"
+        mkdir -p "$temp_base_dir"
+        
+        temp_tile_dirs=()
+        successful_files=()
+        
+        # Process each GeoTIFF individually using Docker
         for geotiff in "${geotiff_files[@]}"; do
-            docker_file_args+=("/input/$(basename "$geotiff")")
-        done
-        
-        # Use Docker to create VRT with resolution=highest and preserve alpha transparency
-        if docker run --rm \
-            -v "$folder:/input" \
-            -v "$VRT_DIR:/output" \
-            geodata/gdal:latest \
-            gdalbuildvrt \
-            -resolution highest \
-            -hidenodata \
-            "/output/${folder_name}.vrt" \
-            "${docker_file_args[@]}"; then
-            echo "  ✅ VRT created: $vrt_file"
+            filename=$(basename "$geotiff" .tif)
+            temp_output="$temp_base_dir/$filename"
+            temp_docker_output="$temp_base_dir/docker_${filename}"
+            mkdir -p "$temp_docker_output"
             
-            # Generate tiles from VRT using Docker
-            output_path="$OUTPUT_DIR/$folder_name"
+            echo "  📍 Processing $(basename "$geotiff")..."
             
-            echo "🚀 Generating tiles for $folder_name..."
-            
-            # Check if tiles already exist and are recent
-            if [[ -d "$output_path" ]]; then
-                # Check if the output path has actual tile files, not just empty directories
-                tile_count=$(find "$output_path" -name "*.png" | wc -l)
-                if [[ $tile_count -gt 0 ]]; then
-                    # Check if any source file is newer than the tiles
-                    needs_update=false
-                    for geotiff in "${geotiff_files[@]}"; do
-                        if [[ "$geotiff" -nt "$output_path" ]]; then
-                            needs_update=true
-                            break
-                        fi
-                    done
-                    
-                    if [[ "$needs_update" == false ]]; then
-                        echo "  ✅ Tiles are up to date, skipping..."
-                        processed_layers+=("$folder_name")
-                        continue
-                    fi
-                else
-                    echo "  🔄 Existing directory is empty, regenerating..."
-                fi
-            fi
-            
-            # Create output directory
-            mkdir -p "$output_path"
-            
-            # Create temporary output directory for Docker
-            temp_output="$OUTPUT_DIR/temp_${folder_name}"
-            mkdir -p "$temp_output"
-            
-            # Use Docker to generate tiles (TMS format)
-            echo "  🐳 Running Docker GDAL tile generation..."
+            # Generate tiles for this individual file using Docker (TMS format)
             if docker run --rm \
-                -v "$VRT_DIR:/input" \
-                -v "$temp_output:/output" \
+                -v "$(dirname "$geotiff"):/input" \
+                -v "$temp_docker_output:/output" \
                 geodata/gdal:latest \
                 gdal2tiles.py \
                 --profile=mercator \
                 --webviewer=none \
                 --resampling=bilinear \
                 --zoom="$MIN_ZOOM-$MAX_ZOOM" \
-                --processes="$PROCESSES" \
+                --processes=1 \
                 --tilesize="$TILE_SIZE" \
-                "/input/${folder_name}.vrt" \
+                "/input/$(basename "$geotiff")" \
                 "/output"; then
                 
-                echo "  🔄 Converting TMS to XYZ format..."
                 # Convert TMS to XYZ format (flip Y coordinate)
-                for zoom_dir in "$temp_output"/*; do
+                echo "    🔄 Converting TMS to XYZ format..."
+                mkdir -p "$temp_output"
+                
+                for zoom_dir in "$temp_docker_output"/*; do
                     if [[ -d "$zoom_dir" && $(basename "$zoom_dir") =~ ^[0-9]+$ ]]; then
                         zoom_level=$(basename "$zoom_dir")
                         max_y=$((2**zoom_level - 1))
                         
-                        mkdir -p "$output_path/$zoom_level"
+                        mkdir -p "$temp_output/$zoom_level"
                         
                         for x_dir in "$zoom_dir"/*; do
                             if [[ -d "$x_dir" ]]; then
                                 x_coord=$(basename "$x_dir")
-                                mkdir -p "$output_path/$zoom_level/$x_coord"
+                                mkdir -p "$temp_output/$zoom_level/$x_coord"
                                 
                                 for tile_file in "$x_dir"/*.png; do
                                     if [[ -f "$tile_file" ]]; then
                                         y_tms=$(basename "$tile_file" .png)
                                         y_xyz=$((max_y - y_tms))
-                                        cp "$tile_file" "$output_path/$zoom_level/$x_coord/$y_xyz.png"
+                                        cp "$tile_file" "$temp_output/$zoom_level/$x_coord/$y_xyz.png"
                                     fi
                                 done
                             fi
@@ -264,24 +256,43 @@ for folder in "${input_folders[@]}"; do
                     fi
                 done
                 
-                # Clean up temporary directory
-                rm -rf "$temp_output"
+                # Clean up docker temp directory
+                rm -rf "$temp_docker_output"
                 
-                echo "  ✅ Completed $folder_name"
-                processed_layers+=("$folder_name")
+                temp_tile_dirs+=("$temp_output")
+                successful_files+=("$geotiff")
+                
+                # Count tiles generated for this file
+                tile_count=$(find "$temp_output" -name "*.png" 2>/dev/null | wc -l)
+                echo "    ✅ Generated $tile_count tiles for $(basename "$geotiff")"
             else
-                echo "  ❌ Failed to generate tiles for $folder_name"
-                rm -rf "$temp_output"
+                echo "    ❌ Failed to generate tiles for $(basename "$geotiff")"
+                rm -rf "$temp_docker_output"
+            fi
+        done
+        
+        # Merge all individual tile directories
+        if [[ ${#temp_tile_dirs[@]} -gt 0 ]]; then
+            output_path="$OUTPUT_DIR/$folder_name"
+            
+            if merge_tile_directories "$output_path" "${temp_tile_dirs[@]}"; then
+                echo "  ✅ Successfully merged tiles for $folder_name"
+                processed_layers+=("$folder_name")
+                
+                # Clean up temp directories
+                rm -rf "$temp_base_dir"
+            else
+                echo "  ❌ Failed to merge tiles for $folder_name"
             fi
         else
-            echo "  ❌ Failed to create VRT for $folder_name"
+            echo "  ❌ No tiles were generated for any files in $folder_name"
         fi
     fi
     echo ""
 done
 
-# Clean up VRT files
-echo "🧹 Cleaning up temporary VRT files..."
+# Clean up temporary files
+echo "🧹 Cleaning up temporary files..."
 rm -rf "$VRT_DIR"
 
 if [[ ${#processed_layers[@]} -eq 0 ]]; then
@@ -294,8 +305,19 @@ echo "🎨 Updating web viewer..."
 
 # Update viewer HTML to dynamically discover layers
 update_viewer() {
+    local layers=("$@")
+    
+    # Create JavaScript array from layers
+    local js_layers=""
+    for layer in "${layers[@]}"; do
+        if [[ -n "$js_layers" ]]; then
+            js_layers="$js_layers, "
+        fi
+        js_layers="$js_layers'$layer'"
+    done
+    
     # Create viewer HTML with dynamic layer discovery
-    cat > "$VIEWER_DIR/index.html" << 'EOF'
+    cat > "$VIEWER_DIR/index.html" << EOF
 <!DOCTYPE html>
 <html>
 <head>
@@ -316,7 +338,7 @@ update_viewer() {
 </head>
 <body>
     <div class="performance-info">
-        🐳 Enhanced Docker GDAL | VRT + TMS→XYZ | <span id="layer-count">...</span> Layers | Folder-based
+        🐳 Enhanced Docker GDAL | Individual Processing + TMS→XYZ | <span id="layer-count">...</span> Layers | Folder-based
     </div>
     <div id="map"></div>
     
@@ -335,7 +357,7 @@ update_viewer() {
             try {
                 // Attempt to fetch the tiles directory listing
                 // This is a fallback approach - in production you might want a proper API
-                const knownLayers = ['ambient', 'shadows', 'texture'];  // Add more as needed
+                const knownLayers = [$js_layers];  // Generated from actual tile layers
                 const availableLayers = [];
                 
                 for (const layer of knownLayers) {
@@ -461,13 +483,13 @@ EOF
     echo "✅ Enhanced Docker viewer created with dynamic layer discovery"
 }
 
-update_viewer
+update_viewer "${processed_layers[@]}"
 
 echo ""
 echo "✅ Enhanced Docker GDAL tile generation complete!"
 echo "📁 Generated ${#processed_layers[@]} tile layer(s): $(IFS=', '; echo "${processed_layers[*]}")"
 echo "📁 Tiles saved to: $OUTPUT_DIR"
-echo "🐳 Used Docker VRT + TMS→XYZ conversion for compatibility"
+echo "🐳 Used Docker individual processing + TMS→XYZ conversion for optimal performance"
 echo "🌐 Starting CORS-enabled server on port $PORT..."
 echo ""
 
